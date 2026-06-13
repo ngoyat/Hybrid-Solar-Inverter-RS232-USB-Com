@@ -46,6 +46,16 @@ If your inverter has this style of port and communicates via Modbus RTU at **960
 
 Tested With Model :
 Gootu GT-H4865M27P9 6.5Kw Solar Hybrid Inverter Supporting 9000w PV
+
+---
+
+## Sketches
+
+| Sketch | Folder | Description |
+|---|---|---|
+| `inverter_monitor.ino` | `inverter_monitor/` | Original — read-only telemetry monitor, publishes live data over MQTT |
+| `inv_monitor_conf.ino` | `inv_monitor_conf/` | Extended — adds MQTT-controlled inverter settings writes with full flash-wear protection |
+
 ---
 
 ## Hardware Required
@@ -86,11 +96,16 @@ Take Ref from Picture , MAX3232 Board RX TX is marked as  ──► and can conf
 Install these via **Arduino IDE → Library Manager**:
 
 - `PubSubClient` by Nick O'Leary
+- `ArduinoJson` by Benoit Blanchon
 - `ESP8266WiFi` — bundled with the ESP8266 Arduino board package
 
 ---
 
-## Configuration
+## inverter_monitor — Original Sketch
+
+Read-only telemetry sketch. Publishes live inverter data to MQTT. No settings writes.
+
+### Configuration
 
 Open `inverter_monitor/inverter_monitor.ino` and edit only this block at the top:
 
@@ -111,11 +126,7 @@ Open `inverter_monitor/inverter_monitor.ino` and edit only this block at the top
 #define POLL_SECONDS     10              // how often to read (seconds)
 ```
 
-That's all you need to change. Do **not** modify register addresses unless you know what you're doing.
-
----
-
-## MQTT Topics Published
+### MQTT Topics Published
 
 All values are published under `<MQTT_BASE_TOPIC>/` with `retain = true`.
 
@@ -145,9 +156,70 @@ All values are published under `<MQTT_BASE_TOPIC>/` with `retain = true`.
 
 ---
 
+## inv_monitor_conf — Settings Control Sketch
+
+Extends the original telemetry monitor with **MQTT-controlled inverter settings writes**. Designed with maximum protection against flash wear on both the inverter and the ESP8266.
+
+### Key Features
+
+- **Read-only telemetry** — all live data polling uses FC03 (read-only Modbus), never touches settings registers
+- **MQTT settings writes** — send one parameter at a time via `inverter/settings/set`
+- **Read-before-write** — reads the current register value first; skips FC10 write if the inverter already holds the same value
+- **500 ms minimum write gap** — enforced in RAM to match inverter timing requirements
+- **No retry on failure** — a failed write is final; no automatic retry loop
+- **No writes on boot/reconnect** — `setup()` has zero FC10 calls; reconnect logic has zero Modbus calls
+- **Retained MQTT cleanup** — publishes empty retained message to command topic on connect to prevent stale command replay after reboot
+- **ESP flash protection** — `WiFi.persistent(false)` prevents credential writes to ESP8266 flash on every reconnect
+- **Single write path** — `sendFC10()` has exactly one call site: `writeIfChanged()`
+- **Validation before write** — every setting is range-checked and battery-type-checked before any write is attempted
+
+### Supported Settings (via MQTT)
+
+| MQTT Key | Register | Description | Unit |
+|---|---|---|---|
+| `output_priority` | 0x4102 | 0=GPB 1=PGB 2=PBG 3=MKS | — |
+| `grid_charge_current` | 0x4105 | Grid charge current | A |
+| `max_charge_current` | 0x4106 | Max charge current | — |
+| `battery_type` | 0x4107 | 0=AGM 1=Flooded 2=Ternary 3=LiFePO4 4=Custom | — |
+| `battery_low_cutoff` | 0x4108 | Battery low-voltage cutoff | 0.1V |
+| `battery_undervoltage` | 0x4109 | Under-voltage shutdown point | 0.1V |
+| `cv_point` | 0x410A | Constant voltage (CV) point | 0.1V |
+| `float_voltage` | 0x410B | Float voltage point | 0.1V |
+| `switch_to_grid_voltage` | 0x410C | Switch-to-grid voltage | 0.1V |
+| `return_to_battery_v` | 0x410D | Return-to-battery voltage | 0.1V |
+| `grid_feed_in_enable` | 0x412E | Grid feed-in 0=OFF 1=INT | — |
+
+### MQTT Usage
+
+**Read all current settings:**
+```
+Topic:   inverter/settings/get
+Payload: all
+```
+
+**Write a single setting:**
+```
+Topic:   inverter/settings/set
+Payload: {"cv_point": 57.0}
+```
+
+Only one key per message is accepted. Multi-key JSON is rejected.
+
+**Settings status feedback:**
+```
+Topic:   inverter/settings/status
+```
+Reports `write_ok`, `already_set`, `write_fail`, `validation_error`, or `parse_error`.
+
+### Configuration
+
+Open `inv_monitor_conf/inv_monitor_conf.ino` and edit the same WiFi/MQTT block as the original sketch.
+
+---
+
 ## Flash Wear Protection
 
-The sketch calls `WiFi.persistent(false)` before every `WiFi.begin()`. This prevents the ESP8266 SDK from writing WiFi credentials to flash on every connect/reconnect, protecting the flash chip from unnecessary write cycles. No EEPROM, SPIFFS, or LittleFS is used anywhere in this sketch — all data lives in RAM.
+Both sketches call `WiFi.persistent(false)` before `WiFi.begin()`. This prevents the ESP8266 SDK from writing WiFi credentials to flash on every connect/reconnect. No EEPROM, SPIFFS, or LittleFS is used — all runtime data lives in RAM. The `inv_monitor_conf` sketch additionally uses read-before-write and a 500 ms write gap to minimise inverter register write cycles.
 
 ---
 
